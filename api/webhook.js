@@ -3,13 +3,19 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 const CHANNELS = [
-  { username: "@KBCYBERTEAM", url: "https://t.me/KBCYBERTEAM" },
-  { username: "@iptvlinksm3u8", url: "https://t.me/iptvlinksm3u8" }
+  {
+    name: "KBCYBERTEAM",
+    url: "https://t.me/KBCYBERTEAM"
+  },
+  {
+    name: "IPTV Links M3U8",
+    url: "https://t.me/iptvlinksm3u8"
+  }
 ];
 
 const TG = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Vercel serverless instances may restart, so this is best-effort only.
+// Language preference is best-effort; Vercel instances can restart.
 const languageByUser = new Map();
 
 async function telegram(method, body) {
@@ -22,7 +28,7 @@ async function telegram(method, body) {
   const data = await response.json();
 
   if (!response.ok || !data.ok) {
-    throw new Error(data.description || `${method} failed`);
+    throw new Error(data.description || `Telegram ${method} failed`);
   }
 
   return data.result;
@@ -39,20 +45,41 @@ async function sendMessage(chatId, text, extra = {}) {
 function mainKeyboard() {
   return {
     keyboard: [
-      [{ text: "🇧🇩 বাংলা" }, { text: "🇬🇧 English" }],
-      [{ text: "ℹ️ Help" }, { text: "🤖 About" }]
+      [
+        { text: "🇧🇩 বাংলা" },
+        { text: "🇬🇧 English" }
+      ],
+      [
+        { text: "ℹ️ Help" },
+        { text: "🤖 About" }
+      ]
     ],
     resize_keyboard: true,
     is_persistent: true
   };
 }
 
-function joinKeyboard() {
+function channelKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "📢 Join KBCYBERTEAM", url: CHANNELS[0].url }],
-      [{ text: "📺 Join IPTV Links M3U8", url: CHANNELS[1].url }],
-      [{ text: "✅ Joined — Verify", callback_data: "verify_join" }]
+      [
+        {
+          text: "📢 Join KBCYBERTEAM",
+          url: CHANNELS[0].url
+        }
+      ],
+      [
+        {
+          text: "📺 Join IPTV Links M3U8",
+          url: CHANNELS[1].url
+        }
+      ],
+      [
+        {
+          text: "▶️ Continue to Bot",
+          callback_data: "continue"
+        }
+      ]
     ]
   };
 }
@@ -60,10 +87,21 @@ function joinKeyboard() {
 function articleKeyboard(url) {
   return {
     inline_keyboard: [
-      [{ text: "📖 Full Wikipedia Article", url }],
       [
-        { text: "🇧🇩 বাংলা", callback_data: "lang_bn" },
-        { text: "🇬🇧 English", callback_data: "lang_en" }
+        {
+          text: "📖 Full Wikipedia Article",
+          url
+        }
+      ],
+      [
+        {
+          text: "🇧🇩 বাংলা",
+          callback_data: "lang_bn"
+        },
+        {
+          text: "🇬🇧 English",
+          callback_data: "lang_en"
+        }
       ]
     ]
   };
@@ -76,23 +114,6 @@ function escapeHtml(value = "") {
     .replace(/>/g, "&gt;");
 }
 
-async function checkMembership(userId) {
-  for (const channel of CHANNELS) {
-    const member = await telegram("getChatMember", {
-      chat_id: channel.username,
-      user_id: userId
-    });
-
-    const joined =
-      ["creator", "administrator", "member"].includes(member.status) ||
-      (member.status === "restricted" && member.is_member === true);
-
-    if (!joined) return false;
-  }
-
-  return true;
-}
-
 async function wikiRequest(lang, params) {
   const url = `https://${lang}.wikipedia.org/w/api.php?${new URLSearchParams({
     ...params,
@@ -102,12 +123,12 @@ async function wikiRequest(lang, params) {
 
   const response = await fetch(url, {
     headers: {
-      "User-Agent": "WikiSearchTelegramBot/2.0 (Wikipedia API client)"
+      "User-Agent": "WikiSearchTelegramBot/2.0"
     }
   });
 
   if (!response.ok) {
-    throw new Error(`Wikipedia HTTP ${response.status}`);
+    throw new Error(`Wikipedia returned HTTP ${response.status}`);
   }
 
   return response.json();
@@ -122,6 +143,7 @@ async function wikipediaSearch(query, lang) {
   });
 
   const page = search.query?.search?.[0];
+
   if (!page) return null;
 
   const data = await wikiRequest(lang, {
@@ -135,17 +157,20 @@ async function wikipediaSearch(query, lang) {
   });
 
   const article = data.query?.pages?.[String(page.pageid)];
-  if (!article || article.missing !== undefined) return null;
 
-  // Collect image titles attached to this Wikipedia article.
+  if (!article || article.missing !== undefined) {
+    return null;
+  }
+
   const imageTitles = (article.images || [])
     .map(item => item.title)
-    .filter(title => /\.(jpe?g|png|webp|gif)$/i.test(title || ""))
+    .filter(title =>
+      /\.(jpe?g|png|webp|gif)$/i.test(title || "")
+    )
     .slice(0, 50);
 
-  let imageUrls = [];
+  const imageUrls = [];
 
-  // Query image URLs in batches to stay within API limits.
   for (let i = 0; i < imageTitles.length; i += 50) {
     const batch = imageTitles.slice(i, i + 50);
 
@@ -156,29 +181,29 @@ async function wikipediaSearch(query, lang) {
       titles: batch.join("|")
     });
 
-    for (const item of Object.values(imageData.query?.pages || {})) {
-      const imageUrl = item.imageinfo?.[0]?.url;
-      if (imageUrl && /^https:\/\//i.test(imageUrl)) {
-        imageUrls.push(imageUrl);
+    for (const imagePage of Object.values(
+      imageData.query?.pages || {}
+    )) {
+      const url = imagePage.imageinfo?.[0]?.url;
+
+      if (url && /^https:\/\//i.test(url)) {
+        imageUrls.push(url);
       }
     }
   }
 
-  imageUrls = [...new Set(imageUrls)].slice(0, 50);
-
   return {
     title: article.title || page.title,
-    extract: article.extract || "No summary available.",
+    extract: article.extract || "No summary is available.",
     url: article.fullurl ||
       `https://${lang}.wikipedia.org/?curid=${page.pageid}`,
-    images: imageUrls
+    images: [...new Set(imageUrls)].slice(0, 50)
   };
 }
 
 async function sendImageAlbums(chatId, images, title) {
   let sent = 0;
 
-  // Telegram media groups accept 2–10 photos per album.
   for (let i = 0; i < images.length; i += 10) {
     const batch = images.slice(i, i + 10);
 
@@ -187,26 +212,30 @@ async function sendImageAlbums(chatId, images, title) {
         await telegram("sendPhoto", {
           chat_id: chatId,
           photo: batch[0],
-          caption: sent === 0 ? `📸 ${title}` : undefined
+          caption: sent === 0
+            ? `📸 ${title}`.slice(0, 1000)
+            : undefined
         });
       } else {
+        const media = batch.map((url, index) => ({
+          type: "photo",
+          media: url,
+          ...(sent === 0 && index === 0
+            ? { caption: `📸 ${title}`.slice(0, 1000) }
+            : {})
+        }));
+
         await telegram("sendMediaGroup", {
           chat_id: chatId,
-          media: batch.map((url, index) => ({
-            type: "photo",
-            media: url,
-            ...(sent === 0 && index === 0
-              ? { caption: `📸 ${title}` }
-              : {})
-          }))
+          media
         });
       }
 
       sent += batch.length;
     } catch (error) {
-      console.error("Image album failed:", error.message);
+      console.error("Album failed:", error.message);
 
-      // Try individual images if an album fails.
+      // Fallback: try each photo individually.
       for (const url of batch) {
         try {
           await telegram("sendPhoto", {
@@ -215,7 +244,7 @@ async function sendImageAlbums(chatId, images, title) {
           });
           sent++;
         } catch (photoError) {
-          console.error("Image failed:", photoError.message);
+          console.error("Photo failed:", photoError.message);
         }
       }
     }
@@ -229,7 +258,7 @@ async function showSearch(chatId, query, lang) {
     await sendMessage(
       chatId,
       lang === "bn"
-        ? "🔎 যে বিষয় খুঁজতে চান তার নাম লিখুন।"
+        ? "🔎 যে ব্যক্তি বা বিষয় খুঁজতে চান তার নাম লিখুন।"
         : "🔎 Send the name or topic you want to search.",
       { reply_markup: mainKeyboard() }
     );
@@ -248,11 +277,16 @@ async function showSearch(chatId, query, lang) {
   try {
     result = await wikipediaSearch(query, lang);
   } catch (error) {
-    console.error("Wikipedia error:", error.message);
+    console.error("Wikipedia search error:", error.message);
+
     await sendMessage(
       chatId,
-      "⚠️ Wikipedia থেকে তথ্য পাওয়া যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।"
+      lang === "bn"
+        ? "⚠️ Wikipedia থেকে তথ্য আনা যায়নি। একটু পরে আবার চেষ্টা করুন।"
+        : "⚠️ Could not retrieve Wikipedia data. Please try again later.",
+      { reply_markup: mainKeyboard() }
     );
+
     return;
   }
 
@@ -260,19 +294,21 @@ async function showSearch(chatId, query, lang) {
     await sendMessage(
       chatId,
       lang === "bn"
-        ? "এই ভাষায় কোনো আর্টিকেল পাওয়া যায়নি। English বোতাম দিয়ে চেষ্টা করুন।"
-        : "No article found. Try the বাংলা button.",
+        ? "কোনো আর্টিকেল পাওয়া যায়নি। অন্য নামে চেষ্টা করুন অথবা English নির্বাচন করুন।"
+        : "No article found. Try another name or select বাংলা.",
       { reply_markup: mainKeyboard() }
     );
     return;
   }
 
-  const languageName = lang === "bn" ? "বাংলা Wikipedia" : "English Wikipedia";
+  const languageName = lang === "bn"
+    ? "বাংলা Wikipedia"
+    : "English Wikipedia";
 
   await sendMessage(
     chatId,
     `📚 <b>${escapeHtml(result.title)}</b>\n` +
-      `🌐 ${languageName}\n\n` +
+      `🌐 ${languageName}\n` +
       `🖼️ ${result.images.length}টি ছবির লিংক পাওয়া গেছে।`,
     {
       parse_mode: "HTML",
@@ -286,26 +322,25 @@ async function showSearch(chatId, query, lang) {
     await sendMessage(
       chatId,
       lang === "bn"
-        ? "এই আর্টিকেলে উপযুক্ত ছবি পাওয়া যায়নি।"
-        : "No supported images were found for this article."
+        ? "এই আর্টিকেলে সমর্থিত ছবি পাওয়া যায়নি।"
+        : "No supported images were found in this article."
     );
   }
 
-  await sendMessage(
-    chatId,
+  const summary =
     `<b>${escapeHtml(result.title)}</b>\n\n` +
-      escapeHtml(result.extract).slice(0, 3500),
-    {
-      parse_mode: "HTML",
-      reply_markup: articleKeyboard(result.url)
-    }
-  );
+    escapeHtml(result.extract).slice(0, 3500);
+
+  await sendMessage(chatId, summary.slice(0, 4000), {
+    parse_mode: "HTML",
+    reply_markup: articleKeyboard(result.url)
+  });
 
   await sendMessage(
     chatId,
     lang === "bn"
-      ? "আরও কিছু খুঁজতে পরের নামটি লিখুন। নিচে ভাষা পরিবর্তন করতে পারবেন।"
-      : "Send another topic to search. You can change language below.",
+      ? "আরও কিছু খুঁজতে পরের নামটি লিখুন। ভাষা বদলাতে নিচের Menu ব্যবহার করুন।"
+      : "Send another topic to search. Use the menu below to change language.",
     { reply_markup: mainKeyboard() }
   );
 }
@@ -318,6 +353,7 @@ async function handleUpdate(update) {
 
   const chatId = message.chat.id;
   const userId = update.message?.from?.id || callback?.from?.id;
+
   if (!userId) return;
 
   if (callback) {
@@ -326,34 +362,14 @@ async function handleUpdate(update) {
     }).catch(() => {});
   }
 
-  let joined;
-
-  try {
-    joined = await checkMembership(userId);
-  } catch (error) {
-    console.error("Membership check failed:", error.message);
-    await sendMessage(
-      chatId,
-      "⚠️ Membership যাচাই করা যাচ্ছে না। বটকে দুই চ্যানেলেই Admin করুন।"
-    );
-    return;
-  }
-
-  if (!joined) {
-    await sendMessage(
-      chatId,
-      "🔒 বট ব্যবহার করতে দুই চ্যানেলেই Join করুন।\n" +
-        "Join BOTH channels to use this bot.",
-      { reply_markup: joinKeyboard() }
-    );
-    return;
-  }
+  // No getChatMember call here: membership verification is disabled.
+  // Join links are provided, but actual membership is not enforced.
 
   if (callback) {
-    if (callback.data === "verify_join") {
+    if (callback.data === "continue") {
       await sendMessage(
         chatId,
-        "✅ যাচাই সম্পন্ন! ভাষা বেছে নিন।\nChoose your language.",
+        "🌐 ভাষা বেছে নিন / Choose your language:",
         { reply_markup: mainKeyboard() }
       );
       return;
@@ -367,7 +383,7 @@ async function handleUpdate(update) {
         chatId,
         lang === "bn"
           ? "🇧🇩 বাংলা নির্বাচন করা হয়েছে। এখন সার্চের নাম লিখুন।"
-          : "🇬🇧 English selected. Now send a search topic.",
+          : "🇬🇧 English selected. Send a name or topic.",
         { reply_markup: mainKeyboard() }
       );
       return;
@@ -384,10 +400,21 @@ async function handleUpdate(update) {
     await sendMessage(
       chatId,
       "👋 <b>Wiki Search Bot</b>\n\n" +
-        "🇧🇩 বাংলা অথবা 🇬🇧 English বেছে নিন। এরপর যেকোনো বিষয় লিখুন।\n\n" +
-        "Choose your language from the menu, then send a name or topic.",
-      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+        "বাংলা ও English Wikipedia-তে সার্চ করুন।\n" +
+        "Search Wikipedia in Bengali or English.\n\n" +
+        "চ্যানেলে যোগ দিতে নিচের Link ব্যবহার করতে পারেন।",
+      {
+        parse_mode: "HTML",
+        reply_markup: channelKeyboard()
+      }
     );
+
+    await sendMessage(
+      chatId,
+      "🌐 ভাষা বেছে নিন / Choose your language:",
+      { reply_markup: mainKeyboard() }
+    );
+
     return;
   }
 
@@ -395,11 +422,15 @@ async function handleUpdate(update) {
     await sendMessage(
       chatId,
       "📖 <b>Help / সাহায্য</b>\n\n" +
-        "• ভাষা নির্বাচন করুন।\n" +
-        "• সার্চের নাম বা বিষয় লিখুন।\n" +
-        "• Wikipedia আর্টিকেলের সঙ্গে যুক্ত ছবিগুলো পাওয়া গেলে পাঠানো হবে।\n" +
-        "• Full Article বাটনে মূল আর্টিকেল খুলুন।",
-      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+        "1. 🇧🇩 বাংলা অথবা 🇬🇧 English চাপুন।\n" +
+        "2. কোনো নাম বা বিষয় লিখুন।\n" +
+        "3. পাওয়া ছবি ও সারাংশ দেখুন।\n" +
+        "4. Full Wikipedia Article বোতামে চাপুন।\n\n" +
+        "Choose a language, send a topic, and open the full article.",
+      {
+        parse_mode: "HTML",
+        reply_markup: mainKeyboard()
+      }
     );
     return;
   }
@@ -407,18 +438,24 @@ async function handleUpdate(update) {
   if (cmd === "about" || text === "🤖 About") {
     await sendMessage(
       chatId,
-      "🤖 Wiki Search Bot\nবাংলা ও English Wikipedia search.\n\n" +
-        "Required channels:\nhttps://t.me/KBCYBERTEAM\nhttps://t.me/iptvlinksm3u8",
-      { reply_markup: mainKeyboard() }
+      "🤖 Wiki Search Bot\n\n" +
+        "বাংলা ও English Wikipedia search.\n\n" +
+        "📢 Channels:\n" +
+        "https://t.me/KBCYBERTEAM\n" +
+        "https://t.me/iptvlinksm3u8",
+      {
+        reply_markup: channelKeyboard()
+      }
     );
     return;
   }
 
   if (text === "🇧🇩 বাংলা") {
     languageByUser.set(userId, "bn");
+
     await sendMessage(
       chatId,
-      "✅ বাংলা ভাষা নির্বাচন করা হয়েছে। এখন সার্চের বিষয় লিখুন।",
+      "✅ বাংলা নির্বাচন করা হয়েছে। এখন সার্চের বিষয় লিখুন।",
       { reply_markup: mainKeyboard() }
     );
     return;
@@ -426,24 +463,21 @@ async function handleUpdate(update) {
 
   if (text === "🇬🇧 English") {
     languageByUser.set(userId, "en");
+
     await sendMessage(
       chatId,
-      "✅ English selected. Send a name or topic to search.",
+      "✅ English selected. Send a name or topic.",
       { reply_markup: mainKeyboard() }
     );
     return;
   }
 
-  const lang = languageByUser.get(userId);
+  const lang = languageByUser.get(userId) ||
+    ((message.from?.language_code || "").toLowerCase().startsWith("bn")
+      ? "bn"
+      : "en");
 
-  if (!lang) {
-    await sendMessage(
-      chatId,
-      "🌐 প্রথমে নিচের Menu থেকে ভাষা বেছে নিন।\nChoose your language first.",
-      { reply_markup: mainKeyboard() }
-    );
-    return;
-  }
+  languageByUser.set(userId, lang);
 
   await showSearch(chatId, text, lang);
 }
@@ -454,21 +488,28 @@ export default async function handler(req, res) {
   }
 
   if (!BOT_TOKEN || !WEBHOOK_SECRET) {
+    console.error("Missing environment variables.");
+
     return res.status(500).json({
       ok: false,
-      error: "Missing environment variables."
+      error: "Missing TELEGRAM_BOT_TOKEN or WEBHOOK_SECRET."
     });
   }
 
-  if (req.headers["x-telegram-bot-api-secret-token"] !== WEBHOOK_SECRET) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  if (
+    req.headers["x-telegram-bot-api-secret-token"] !== WEBHOOK_SECRET
+  ) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized"
+    });
   }
 
   try {
     await handleUpdate(req.body);
-    return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error("Update failed:", error.message);
-    return res.status(200).json({ ok: true });
+    console.error("Update processing failed:", error.message);
   }
+
+  return res.status(200).json({ ok: true });
 }
