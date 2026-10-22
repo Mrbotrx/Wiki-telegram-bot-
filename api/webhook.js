@@ -1,8 +1,16 @@
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const SECRET = process.env.WEBHOOK_SECRET;
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-const TG = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const CHANNELS = [
+  { username: "@KBCYBERTEAM", url: "https://t.me/KBCYBERTEAM" },
+  { username: "@iptvlinksm3u8", url: "https://t.me/iptvlinksm3u8" }
+];
+
+const TG = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// Vercel serverless instances may restart, so this is best-effort only.
+const languageByUser = new Map();
 
 async function telegram(method, body) {
   const response = await fetch(`${TG}/${method}`, {
@@ -11,29 +19,16 @@ async function telegram(method, body) {
     body: JSON.stringify(body)
   });
 
-  const result = await response.json();
+  const data = await response.json();
 
-  if (!result.ok) {
-    console.error("Telegram API error:", result.description);
+  if (!response.ok || !data.ok) {
+    throw new Error(data.description || `${method} failed`);
   }
 
-  return result;
+  return data.result;
 }
 
-function keyboard() {
-  return {
-    keyboard: [
-      [{ text: "🔎 Search Celebrity" }],
-      [
-        { text: "ℹ️ Help" },
-        { text: "🌐 About" }
-      ]
-    ],
-    resize_keyboard: true
-  };
-}
-
-async function sendText(chatId, text, extra = {}) {
+async function sendMessage(chatId, text, extra = {}) {
   return telegram("sendMessage", {
     chat_id: chatId,
     text,
@@ -41,281 +36,439 @@ async function sendText(chatId, text, extra = {}) {
   });
 }
 
-async function searchCelebrity(name) {
-  const params = new URLSearchParams({
-    action: "query",
-    list: "search",
-    srsearch: name,
-    srlimit: "1",
-    format: "json",
-    utf8: "1"
-  });
-
-  let response = await fetch(
-    `https://en.wikipedia.org/w/api.php?${params}`,
-    {
-      headers: {
-        "User-Agent": "CelebrityInfoBot/1.0 (Telegram bot)"
-      },
-      signal: AbortSignal.timeout(10000)
-    }
-  );
-
-  if (!response.ok) throw new Error("Wikipedia unavailable");
-
-  let data = await response.json();
-  let result = data.query?.search?.[0];
-
-  // Fallback to Bengali Wikipedia if English search has no result
-  if (!result) {
-    const bnParams = new URLSearchParams({
-      action: "query",
-      list: "search",
-      srsearch: name,
-      srlimit: "1",
-      format: "json",
-      utf8: "1"
-    });
-
-    response = await fetch(
-      `https://bn.wikipedia.org/w/api.php?${bnParams}`,
-      {
-        headers: {
-          "User-Agent": "CelebrityInfoBot/1.0"
-        },
-        signal: AbortSignal.timeout(10000)
-      }
-    );
-
-    if (!response.ok) throw new Error("Wikipedia unavailable");
-
-    data = await response.json();
-    result = data.query?.search?.[0];
-
-    if (!result) return null;
-
-    return getPageInfo(result.title, "bn");
-  }
-
-  return getPageInfo(result.title, "en");
-}
-
-async function getPageInfo(title, lang) {
-  const params = new URLSearchParams({
-    action: "query",
-    prop: "extracts|pageimages|info",
-    titles: title,
-    exintro: "1",
-    explaintext: "1",
-    piprop: "thumbnail",
-    pithumbsize: "600",
-    inprop: "url",
-    format: "json",
-    redirects: "1"
-  });
-
-  const response = await fetch(
-    `https://${lang}.wikipedia.org/w/api.php?${params}`,
-    {
-      headers: {
-        "User-Agent": "CelebrityInfoBot/1.0"
-      },
-      signal: AbortSignal.timeout(10000)
-    }
-  );
-
-  if (!response.ok) throw new Error("Wikipedia unavailable");
-
-  const data = await response.json();
-  const page = Object.values(data.query?.pages || {})[0];
-
-  if (!page || page.missing !== undefined) return null;
-
+function mainKeyboard() {
   return {
-    title: page.title,
-    description: page.extract || "No biography summary available.",
-    image: page.thumbnail?.source || null,
-    url: page.fullurl ||
-      `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(page.title.replace(/ /g, "_"))}`
+    keyboard: [
+      [{ text: "🇧🇩 বাংলা" }, { text: "🇬🇧 English" }],
+      [{ text: "ℹ️ Help" }, { text: "🤖 About" }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true
   };
 }
 
-async function handleUpdate(update) {
-  if (update.callback_query) {
-    const cb = update.callback_query;
+function joinKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📢 Join KBCYBERTEAM", url: CHANNELS[0].url }],
+      [{ text: "📺 Join IPTV Links M3U8", url: CHANNELS[1].url }],
+      [{ text: "✅ Joined — Verify", callback_data: "verify_join" }]
+    ]
+  };
+}
 
-    await telegram("answerCallbackQuery", {
-      callback_query_id: cb.id
+function articleKeyboard(url) {
+  return {
+    inline_keyboard: [
+      [{ text: "📖 Full Wikipedia Article", url }],
+      [
+        { text: "🇧🇩 বাংলা", callback_data: "lang_bn" },
+        { text: "🇬🇧 English", callback_data: "lang_en" }
+      ]
+    ]
+  };
+}
+
+function escapeHtml(value = "") {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+async function checkMembership(userId) {
+  for (const channel of CHANNELS) {
+    const member = await telegram("getChatMember", {
+      chat_id: channel.username,
+      user_id: userId
     });
 
-    if (cb.data === "search_again") {
-      await sendText(
-        cb.message.chat.id,
-        "🔎 Send the actor or actress name you want to search.",
-        { reply_markup: keyboard() }
-      );
+    const joined =
+      ["creator", "administrator", "member"].includes(member.status) ||
+      (member.status === "restricted" && member.is_member === true);
+
+    if (!joined) return false;
+  }
+
+  return true;
+}
+
+async function wikiRequest(lang, params) {
+  const url = `https://${lang}.wikipedia.org/w/api.php?${new URLSearchParams({
+    ...params,
+    format: "json",
+    utf8: "1"
+  })}`;
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "WikiSearchTelegramBot/2.0 (Wikipedia API client)"
     }
-    return;
+  });
+
+  if (!response.ok) {
+    throw new Error(`Wikipedia HTTP ${response.status}`);
   }
 
-  const message = update.message;
-  if (!message?.chat || !message.text) return;
+  return response.json();
+}
 
-  const chatId = message.chat.id;
-  const text = message.text.trim();
+async function wikipediaSearch(query, lang) {
+  const search = await wikiRequest(lang, {
+    action: "query",
+    list: "search",
+    srsearch: query,
+    srlimit: "1"
+  });
 
-  if (text === "/start") {
-    await sendText(
-      chatId,
-      "🎬 Welcome to Celebrity Info Bot!\n\n" +
-      "Search actors and actresses to find their Wikipedia biography, available photo and article link.\n\n" +
-      "👇 Tap Search Celebrity or send a name.",
-      {
-        reply_markup: keyboard(),
-        reply_to_message_id: message.message_id
+  const page = search.query?.search?.[0];
+  if (!page) return null;
+
+  const data = await wikiRequest(lang, {
+    action: "query",
+    prop: "extracts|info|images",
+    pageids: String(page.pageid),
+    explaintext: "1",
+    exchars: "3500",
+    inprop: "url",
+    imlimit: "max"
+  });
+
+  const article = data.query?.pages?.[String(page.pageid)];
+  if (!article || article.missing !== undefined) return null;
+
+  // Collect image titles attached to this Wikipedia article.
+  const imageTitles = (article.images || [])
+    .map(item => item.title)
+    .filter(title => /\.(jpe?g|png|webp|gif)$/i.test(title || ""))
+    .slice(0, 50);
+
+  let imageUrls = [];
+
+  // Query image URLs in batches to stay within API limits.
+  for (let i = 0; i < imageTitles.length; i += 50) {
+    const batch = imageTitles.slice(i, i + 50);
+
+    const imageData = await wikiRequest(lang, {
+      action: "query",
+      prop: "imageinfo",
+      iiprop: "url",
+      titles: batch.join("|")
+    });
+
+    for (const item of Object.values(imageData.query?.pages || {})) {
+      const imageUrl = item.imageinfo?.[0]?.url;
+      if (imageUrl && /^https:\/\//i.test(imageUrl)) {
+        imageUrls.push(imageUrl);
       }
-    );
-    return;
+    }
   }
 
-  if (text === "/help" || text === "ℹ️ Help") {
-    await sendText(
+  imageUrls = [...new Set(imageUrls)].slice(0, 50);
+
+  return {
+    title: article.title || page.title,
+    extract: article.extract || "No summary available.",
+    url: article.fullurl ||
+      `https://${lang}.wikipedia.org/?curid=${page.pageid}`,
+    images: imageUrls
+  };
+}
+
+async function sendImageAlbums(chatId, images, title) {
+  let sent = 0;
+
+  // Telegram media groups accept 2–10 photos per album.
+  for (let i = 0; i < images.length; i += 10) {
+    const batch = images.slice(i, i + 10);
+
+    try {
+      if (batch.length === 1) {
+        await telegram("sendPhoto", {
+          chat_id: chatId,
+          photo: batch[0],
+          caption: sent === 0 ? `📸 ${title}` : undefined
+        });
+      } else {
+        await telegram("sendMediaGroup", {
+          chat_id: chatId,
+          media: batch.map((url, index) => ({
+            type: "photo",
+            media: url,
+            ...(sent === 0 && index === 0
+              ? { caption: `📸 ${title}` }
+              : {})
+          }))
+        });
+      }
+
+      sent += batch.length;
+    } catch (error) {
+      console.error("Image album failed:", error.message);
+
+      // Try individual images if an album fails.
+      for (const url of batch) {
+        try {
+          await telegram("sendPhoto", {
+            chat_id: chatId,
+            photo: url
+          });
+          sent++;
+        } catch (photoError) {
+          console.error("Image failed:", photoError.message);
+        }
+      }
+    }
+  }
+
+  return sent;
+}
+
+async function showSearch(chatId, query, lang) {
+  if (!query.trim()) {
+    await sendMessage(
       chatId,
-      "ℹ️ HOW TO USE\n\n" +
-      "• Send a celebrity's name.\n" +
-      "• Get an available photo and biography.\n" +
-      "• Open the Wikipedia article for more details.\n\n" +
-      "Examples:\n" +
-      "Leonardo DiCaprio\n" +
-      "Angelina Jolie\n" +
-      "শাকিব খান\n\n" +
-      "Commands: /start /help /about",
-      { reply_markup: keyboard() }
+      lang === "bn"
+        ? "🔎 যে বিষয় খুঁজতে চান তার নাম লিখুন।"
+        : "🔎 Send the name or topic you want to search.",
+      { reply_markup: mainKeyboard() }
     );
     return;
   }
 
-  if (text === "/about" || text === "🌐 About") {
-    await sendText(
-      chatId,
-      "🎬 Celebrity Info Bot\n\n" +
-      "Powered by Wikipedia.\n" +
-      "Photos and biography availability depend on the source article.\n" +
-      "This bot is not affiliated with Wikipedia.",
-      { reply_markup: keyboard() }
-    );
-    return;
-  }
+  await sendMessage(
+    chatId,
+    lang === "bn"
+      ? "🔍 বাংলা Wikipedia-তে খোঁজা হচ্ছে..."
+      : "🔍 Searching English Wikipedia..."
+  );
 
-  if (text === "🔎 Search Celebrity") {
-    await sendText(
-      chatId,
-      "🔎 Enter an actor or actress name to search.",
-      { reply_markup: keyboard() }
-    );
-    return;
-  }
-
-  const query = text.replace(/^\/search(?:@\w+)?\s*/i, "").trim();
-
-  if (query.startsWith("/") || !query || query.length > 200) {
-    await sendText(
-      chatId,
-      "Please send a valid name (maximum 200 characters).",
-      { reply_markup: keyboard() }
-    );
-    return;
-  }
-
-  const waiting = await sendText(chatId, "🔍 Searching Wikipedia...");
+  let result;
 
   try {
-    const person = await searchCelebrity(query);
+    result = await wikipediaSearch(query, lang);
+  } catch (error) {
+    console.error("Wikipedia error:", error.message);
+    await sendMessage(
+      chatId,
+      "⚠️ Wikipedia থেকে তথ্য পাওয়া যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।"
+    );
+    return;
+  }
 
-    if (!person) {
-      await sendText(
+  if (!result) {
+    await sendMessage(
+      chatId,
+      lang === "bn"
+        ? "এই ভাষায় কোনো আর্টিকেল পাওয়া যায়নি। English বোতাম দিয়ে চেষ্টা করুন।"
+        : "No article found. Try the বাংলা button.",
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  const languageName = lang === "bn" ? "বাংলা Wikipedia" : "English Wikipedia";
+
+  await sendMessage(
+    chatId,
+    `📚 <b>${escapeHtml(result.title)}</b>\n` +
+      `🌐 ${languageName}\n\n` +
+      `🖼️ ${result.images.length}টি ছবির লিংক পাওয়া গেছে।`,
+    {
+      parse_mode: "HTML",
+      reply_markup: articleKeyboard(result.url)
+    }
+  );
+
+  if (result.images.length > 0) {
+    await sendImageAlbums(chatId, result.images, result.title);
+  } else {
+    await sendMessage(
+      chatId,
+      lang === "bn"
+        ? "এই আর্টিকেলে উপযুক্ত ছবি পাওয়া যায়নি।"
+        : "No supported images were found for this article."
+    );
+  }
+
+  await sendMessage(
+    chatId,
+    `<b>${escapeHtml(result.title)}</b>\n\n` +
+      escapeHtml(result.extract).slice(0, 3500),
+    {
+      parse_mode: "HTML",
+      reply_markup: articleKeyboard(result.url)
+    }
+  );
+
+  await sendMessage(
+    chatId,
+    lang === "bn"
+      ? "আরও কিছু খুঁজতে পরের নামটি লিখুন। নিচে ভাষা পরিবর্তন করতে পারবেন।"
+      : "Send another topic to search. You can change language below.",
+    { reply_markup: mainKeyboard() }
+  );
+}
+
+async function handleUpdate(update) {
+  const callback = update.callback_query;
+  const message = update.message || callback?.message;
+
+  if (!message?.chat?.id) return;
+
+  const chatId = message.chat.id;
+  const userId = update.message?.from?.id || callback?.from?.id;
+  if (!userId) return;
+
+  if (callback) {
+    await telegram("answerCallbackQuery", {
+      callback_query_id: callback.id
+    }).catch(() => {});
+  }
+
+  let joined;
+
+  try {
+    joined = await checkMembership(userId);
+  } catch (error) {
+    console.error("Membership check failed:", error.message);
+    await sendMessage(
+      chatId,
+      "⚠️ Membership যাচাই করা যাচ্ছে না। বটকে দুই চ্যানেলেই Admin করুন।"
+    );
+    return;
+  }
+
+  if (!joined) {
+    await sendMessage(
+      chatId,
+      "🔒 বট ব্যবহার করতে দুই চ্যানেলেই Join করুন।\n" +
+        "Join BOTH channels to use this bot.",
+      { reply_markup: joinKeyboard() }
+    );
+    return;
+  }
+
+  if (callback) {
+    if (callback.data === "verify_join") {
+      await sendMessage(
         chatId,
-        "❌ No matching Wikipedia article found.\nTry another spelling or name.",
-        { reply_markup: keyboard() }
+        "✅ যাচাই সম্পন্ন! ভাষা বেছে নিন।\nChoose your language.",
+        { reply_markup: mainKeyboard() }
       );
       return;
     }
 
-    const description = person.description.slice(0, 3000);
+    if (callback.data === "lang_bn" || callback.data === "lang_en") {
+      const lang = callback.data === "lang_bn" ? "bn" : "en";
+      languageByUser.set(userId, lang);
 
-    const caption =
-      `🎬 ${person.title}\n\n` +
-      `${description}\n\n` +
-      `📚 Source: Wikipedia`;
-
-    const buttons = {
-      inline_keyboard: [
-        [{ text: "📖 Read Full Biography", url: person.url }],
-        [{ text: "🔎 Search Another", callback_data: "search_again" }]
-      ]
-    };
-
-    if (person.image) {
-      const photoResult = await telegram("sendPhoto", {
-        chat_id: chatId,
-        photo: person.image,
-        caption: caption.slice(0, 1000),
-        reply_markup: buttons
-      });
-
-      if (!photoResult.ok) {
-        await sendText(chatId, caption, {
-          reply_markup: buttons,
-          link_preview_options: { is_disabled: true }
-        });
-      }
-    } else {
-      await sendText(chatId, caption, {
-        reply_markup: buttons,
-        link_preview_options: { is_disabled: true }
-      });
+      await sendMessage(
+        chatId,
+        lang === "bn"
+          ? "🇧🇩 বাংলা নির্বাচন করা হয়েছে। এখন সার্চের নাম লিখুন।"
+          : "🇬🇧 English selected. Now send a search topic.",
+        { reply_markup: mainKeyboard() }
+      );
+      return;
     }
-  } catch (error) {
-    console.error("Celebrity search failed:", error.message);
 
-    await sendText(
-      chatId,
-      "⚠️ Search is temporarily unavailable. Please try again later.",
-      { reply_markup: keyboard() }
-    );
+    return;
   }
+
+  const text = (message.text || "").trim();
+  const command = text.match(/^\/([a-z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+  const cmd = command?.[1]?.toLowerCase();
+
+  if (cmd === "start") {
+    await sendMessage(
+      chatId,
+      "👋 <b>Wiki Search Bot</b>\n\n" +
+        "🇧🇩 বাংলা অথবা 🇬🇧 English বেছে নিন। এরপর যেকোনো বিষয় লিখুন।\n\n" +
+        "Choose your language from the menu, then send a name or topic.",
+      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  if (cmd === "help" || text === "ℹ️ Help") {
+    await sendMessage(
+      chatId,
+      "📖 <b>Help / সাহায্য</b>\n\n" +
+        "• ভাষা নির্বাচন করুন।\n" +
+        "• সার্চের নাম বা বিষয় লিখুন।\n" +
+        "• Wikipedia আর্টিকেলের সঙ্গে যুক্ত ছবিগুলো পাওয়া গেলে পাঠানো হবে।\n" +
+        "• Full Article বাটনে মূল আর্টিকেল খুলুন।",
+      { parse_mode: "HTML", reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  if (cmd === "about" || text === "🤖 About") {
+    await sendMessage(
+      chatId,
+      "🤖 Wiki Search Bot\nবাংলা ও English Wikipedia search.\n\n" +
+        "Required channels:\nhttps://t.me/KBCYBERTEAM\nhttps://t.me/iptvlinksm3u8",
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  if (text === "🇧🇩 বাংলা") {
+    languageByUser.set(userId, "bn");
+    await sendMessage(
+      chatId,
+      "✅ বাংলা ভাষা নির্বাচন করা হয়েছে। এখন সার্চের বিষয় লিখুন।",
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  if (text === "🇬🇧 English") {
+    languageByUser.set(userId, "en");
+    await sendMessage(
+      chatId,
+      "✅ English selected. Send a name or topic to search.",
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  const lang = languageByUser.get(userId);
+
+  if (!lang) {
+    await sendMessage(
+      chatId,
+      "🌐 প্রথমে নিচের Menu থেকে ভাষা বেছে নিন।\nChoose your language first.",
+      { reply_markup: mainKeyboard() }
+    );
+    return;
+  }
+
+  await showSearch(chatId, text, lang);
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({
-      success: false,
-      error: "Method not allowed"
-    });
+    return res.status(200).send("Wiki Search Bot is running.");
   }
 
-  if (!TELEGRAM_TOKEN || !SECRET) {
+  if (!BOT_TOKEN || !WEBHOOK_SECRET) {
     return res.status(500).json({
-      success: false,
-      error: "Bot configuration missing"
+      ok: false,
+      error: "Missing environment variables."
     });
   }
 
-  if (
-    req.headers["x-telegram-bot-api-secret-token"] !== SECRET
-  ) {
-    return res.status(401).json({
-      success: false,
-      error: "Unauthorized"
-    });
+  if (req.headers["x-telegram-bot-api-secret-token"] !== WEBHOOK_SECRET) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
   try {
-    await handleUpdate(req.body || {});
+    await handleUpdate(req.body);
     return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error("Webhook error:", error.message);
+    console.error("Update failed:", error.message);
     return res.status(200).json({ ok: true });
   }
-};
+}
